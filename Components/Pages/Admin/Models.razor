@@ -1,0 +1,28 @@
+@page "/admin/models"
+@attribute [Authorize(Roles = "Admin")]
+@inject ForecastService Forecast
+@inject SettingsService Settings
+@using Microsoft.AspNetCore.Authorization
+@using TvdiWebGis.Services
+@rendermode InteractiveServer
+
+<h3>Mô hình dự báo</h3>
+<p>Mô hình <b>mặc định</b> là mô hình mà người dùng thường nhìn thấy.</p>
+
+@foreach (var m in Forecast.Models)
+{
+    <div class="card p-3 mb-2">
+        <label>
+            <input type="radio" name="m" checked="@(_default == m.Key)" @onchange="() => Set(m.Key)" />
+            <b>@m.DisplayName</b>
+        </label>
+        <small>@m.Description — cần tối thiểu @m.MinPeriods kỳ dữ liệu</small>
+    </div>
+}
+@if (_saved) { <p class="text-success">Đã lưu.</p> }
+
+@code {
+    string _default = "linear"; bool _saved;
+    protected override async Task OnInitializedAsync() => _default = await Settings.GetDefaultModelAsync();
+    async Task Set(string key) { _default = key; await Settings.SetDefaultModelAsync(key); _saved = true; }
+}

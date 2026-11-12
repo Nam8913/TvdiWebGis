@@ -1,0 +1,286 @@
+﻿@page "/"
+@attribute [Authorize]
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.JSInterop
+@using System.Globalization
+@using TvdiWebGis.Data.Entities
+@using TvdiWebGis.Services
+
+@inject IJSRuntime JS
+@inject RasterFileService Rasters
+@inject ForecastService Forecast
+@inject SettingsService Settings
+
+<PageTitle>TVDI TP.HCM</PageTitle>
+
+<div class="toolbar">
+    <label>
+        Kỳ:
+        <select value="@_current" @onchange="OnPeriodChanged">
+            <optgroup label="Quan sát">
+                @foreach (var r in _observed)
+                {
+                    <option value="obs:@r.Id">@r.Period.ToString("MM/yyyy")</option>
+                }
+            </optgroup>
+            <optgroup label="Dự báo">
+                @for (int k = 1; k <= ForecastService.Horizon; k++)
+                {
+                    <option value="fc:@k">@(_last.AddMonths(k).ToString("MM/yyyy")) (+@k)</option>
+                }
+            </optgroup>
+        </select>
+    </label>
+
+    <AuthorizeView Roles="Admin">
+        <Authorized>
+            <label>
+                Mô hình:
+                <select @bind="_modelKey" @bind:after="Reload">
+                    @foreach (var m in Forecast.Models)
+                    {
+                        <option value="@m.Key">@m.DisplayName</option>
+                    }
+                </select>
+            </label>
+        </Authorized>
+        <NotAuthorized>
+            <span class="badge">Mô hình: @_defaultName</span>
+        </NotAuthorized>
+    </AuthorizeView>
+
+    <label>
+        Độ trong suốt
+        <input type="range" min="0.1" max="1" step="0.05" value="0.8" @oninput="OnOpacity" />
+    </label>
+
+    @if (_stats is not null)
+    {
+        <span>
+            TB toàn vùng: <b>@Fmt(_stats.Mean)</b> | Min: @Fmt(_stats.Min) | Max: @Fmt(_stats.Max)
+        </span>
+    }
+</div>
+
+<div class="filter-panel">
+    <label><input type="checkbox" @bind="_wardMode" @bind:after="OnWardMode" /> Hiện giá trị theo phường/xã</label>
+    <label><input type="checkbox" @bind="_showRaster" @bind:after="OnShowRaster" /> Hiện ảnh raster</label>
+
+    <span class="sep"></span>
+
+    <label>
+        Lọc TVDI
+        <select @bind="_op">
+            <option value="gte">≥ (lớn hơn hoặc bằng)</option>
+            <option value="gt">&gt; (lớn hơn)</option>
+            <option value="eq">= (bằng, làm tròn 2 số lẻ)</option>
+            <option value="lte">≤ (nhỏ hơn hoặc bằng)</option>
+            <option value="lt">&lt; (nhỏ hơn)</option>
+            <option value="between">Trong khoảng</option>
+        </select>
+    </label>
+    <input type="number" step="0.01" min="0" max="1" @bind="_val" style="width:80px" />
+    @if (_op == "between")
+    {
+        <span>đến</span>
+        <input type="number" step="0.01" min="0" max="1" @bind="_val2" style="width:80px" />
+    }
+    <button class="btn btn-sm btn-primary" @onclick="ApplyFilter" disabled="@(!_wardMode)">Lọc</button>
+    <button class="btn btn-sm btn-outline-secondary" @onclick="ClearFilter" disabled="@(!_filterOn)">Bỏ lọc</button>
+
+    @if (_summary is not null)
+    {
+        <span class="muted">@_summary.WithData/@_summary.Total phường/xã có dữ liệu</span>
+    }
+    @if (_filterOn && _matches is not null)
+    {
+        <span><b>@_matches.Count</b> phường/xã thỏa mãn</span>
+    }
+</div>
+
+@if (_filterOn && _matches is not null && _matches.Count > 0)
+{
+    <details class="ward-list">
+        <summary>Danh sách phường/xã thỏa mãn (@_matches.Count)</summary>
+        <div class="ward-list-scroll">
+            <table class="table table-sm">
+                <thead><tr><th>#</th><th>Phường/xã</th><th class="text-end">TVDI</th></tr></thead>
+                <tbody>
+                @{ int i = 0; }
+                @foreach (var m in _matches)
+                {
+                    <tr><td>@(++i)</td><td>@m.Name</td><td class="text-end">@m.Mean.ToString("F3", CultureInfo.InvariantCulture)</td></tr>
+                }
+                </tbody>
+            </table>
+        </div>
+    </details>
+}
+
+@if (_observed.Count == 0)
+{
+    <div class="alert alert-info">
+        Chưa có ảnh TVDI nào trong cơ sở dữ liệu.
+        Quản trị viên vào <b>Nạp dữ liệu</b> để tải các file .tif lên.
+    </div>
+}
+
+@if (_error is not null)
+{
+    <div class="alert alert-danger">@_error</div>
+}
+
+<div id="map" style="height:75vh"></div>
+
+@code {
+    class Stats
+    {
+        public double? Mean { get; set; }
+        public double? Min { get; set; }
+        public double? Max { get; set; }
+    }
+    class WardSummary
+    {
+        public int Total { get; set; }
+        public int WithData { get; set; }
+    }
+    class WardMatch
+    {
+        public string Code { get; set; } = "";
+        public string Name { get; set; } = "";
+        public string? Type { get; set; }
+        public double Mean { get; set; }
+    }
+
+    List<RasterFile> _observed = [];
+    DateOnly _last;
+    string _modelKey = "linear";
+    string _defaultName = "";
+    string _current = "";
+    string? _error;
+    double _opacity = 0.8;
+    Stats? _stats;
+
+    // Phường/xã + bộ lọc
+    bool _wardMode = true, _showRaster = true, _filterOn;
+    string _op = "gte";
+    double _val = 0.6, _val2 = 0.8;
+    WardSummary? _summary;
+    List<WardMatch>? _matches;
+
+    static string Fmt(double? v) => v?.ToString("F3", CultureInfo.InvariantCulture) ?? "–";
+
+    protected override async Task OnInitializedAsync()
+    {
+        _observed = await Rasters.ListAsync();
+        _last = _observed.Count > 0 ? _observed[^1].Period : DateOnly.FromDateTime(DateTime.Today);
+
+        _modelKey = await Settings.GetDefaultModelAsync();
+        _defaultName = Forecast.Models.FirstOrDefault(m => m.Key == _modelKey)?.DisplayName ?? _modelKey;
+
+        if (_observed.Count > 0)
+            _current = $"obs:{_observed[^1].Id}";
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try
+        {
+            Console.WriteLine(">>> Home: gọi tvdiMap.init");
+            await JS.InvokeVoidAsync("tvdiMap.init", "map");
+            await Reload();
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+            Console.WriteLine(ex);
+            StateHasChanged();
+        }
+    }
+
+    Task OnPeriodChanged(ChangeEventArgs e)
+    {
+        _current = e.Value?.ToString() ?? "";
+        return Reload();
+    }
+
+    (string raster, string stats) BuildUrls()
+    {
+        // Admin: server dùng ?model. User thường: server bỏ qua, luôn dùng model mặc định.
+        if (_current.StartsWith("obs:"))
+        {
+            var id = _current[4..];
+            return ($"/api/rasters/{id}", $"/api/wards/stats?source=obs:{id}");
+        }
+        var step = _current[3..];
+        var m = Uri.EscapeDataString(_modelKey);
+        return ($"/api/forecast/{step}?model={m}", $"/api/wards/stats?source=fc:{step}&model={m}");
+    }
+
+    async Task Reload()
+    {
+        _error = null;
+        if (string.IsNullOrEmpty(_current))
+        {
+            StateHasChanged();
+            return;
+        }
+
+        var (rasterUrl, statsUrl) = BuildUrls();
+
+        try
+        {
+            await JS.InvokeVoidAsync("tvdiMap.loadTif", rasterUrl, _opacity);
+            _stats = await JS.InvokeAsync<Stats?>("tvdiMap.stats");
+        }
+        catch (Exception ex)
+        {
+            _stats = null;
+            _error = ex.Message;
+            Console.WriteLine(ex);
+        }
+
+        // Giá trị theo phường/xã: lỗi ở đây không được làm hỏng bản đồ raster
+        try
+        {
+            _summary = await JS.InvokeAsync<WardSummary?>("tvdiMap.loadWardStats", statsUrl);
+            if (_filterOn) await ApplyFilter();      // giữ bộ lọc khi đổi kỳ/mô hình
+        }
+        catch (Exception ex)
+        {
+            _summary = null;
+            _matches = null;
+            _error ??= "Thống kê theo phường/xã: " + ex.Message;
+            Console.WriteLine(ex);
+        }
+        StateHasChanged();
+    }
+
+    async Task ApplyFilter()
+    {
+        _filterOn = true;
+        _matches = await JS.InvokeAsync<List<WardMatch>>("tvdiMap.applyFilter", _op, _val, _val2);
+    }
+
+    async Task ClearFilter()
+    {
+        _filterOn = false;
+        _matches = null;
+        await JS.InvokeVoidAsync("tvdiMap.clearFilter");
+    }
+
+    async Task OnWardMode() => await JS.InvokeVoidAsync("tvdiMap.setWardMode", _wardMode);
+    async Task OnShowRaster() => await JS.InvokeVoidAsync("tvdiMap.setRasterVisible", _showRaster);
+
+    async Task OnOpacity(ChangeEventArgs e)
+    {
+        if (double.TryParse(e.Value?.ToString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var o))
+        {
+            _opacity = o;
+            await JS.InvokeVoidAsync("tvdiMap.setOpacity", o);
+        }
+    }
+}
