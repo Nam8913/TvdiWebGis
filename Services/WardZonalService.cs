@@ -36,11 +36,13 @@ public class WardZonalService
 
     public List<WardStat> Compute(byte[] tifBytes)
     {
-        var band = _tiff.Read(tifBytes);
+        return Compute(_tiff.Read(tifBytes));
+    }
+
+    public List<WardStat> Compute(BandData band)
+    {
+        RasterQuality.ValidateGrid(band);
         var gt = band.GeoTransform;
-        if (Math.Abs(gt[0]) > 180 || Math.Abs(gt[3]) > 90)
-            throw new InvalidOperationException(
-                "Raster không ở hệ toạ độ kinh/vĩ độ (EPSG:4326) nên không ghép được với ranh giới phường/xã.");
 
         GridIndex grid;
         lock (_lock)    // IndexedPointInAreaLocator không an toàn khi nhiều luồng dùng lần đầu
@@ -48,7 +50,10 @@ public class WardZonalService
             var key = $"{band.Width}x{band.Height}|" +
                       string.Join(',', gt.Select(x => x.ToString("R", CultureInfo.InvariantCulture)));
             if (!_grids.TryGetValue(key, out grid!))
+            {
+                if (_grids.Count >= 2) _grids.Clear();
                 _grids[key] = grid = BuildGrid(band);
+            }
         }
 
         var wards = _wards.Value;
@@ -60,7 +65,7 @@ public class WardZonalService
             foreach (var idx in grid.Pixels[i])
             {
                 var v = band.Pixels[idx];
-                if (float.IsNaN(v)) continue;
+                if (v is not (>= 0 and <= 1)) continue;
                 sum += v; n++;
                 if (v < min) min = v;
                 if (v > max) max = v;

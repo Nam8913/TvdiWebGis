@@ -16,8 +16,9 @@ window.tvdiMap = (() => {
   const OUTLINE_STYLE = { color: '#000000', weight: 2.5, opacity: 0.9, fill: false };
 
   // ================== Trạng thái ==================
-  let map = null, layer = null, georaster = null, popup = null;
+  let map = null, layer = null, rasterPreview = null, popup = null;
   let wardLayer = null, outlineLayer = null;
+  let wardFeatures = [];
   let wardStats = new Map();      // code → {mean, min, max, validPixels, totalPixels, estimated, ...}
   let wardMode = true;            // tô màu theo phường
   let rasterVisible = true;
@@ -52,13 +53,14 @@ window.tvdiMap = (() => {
     cv.width = w; cv.height = h;
     const ctx = cv.getContext('2d');
     const img = ctx.createImageData(w, h);
-    const band = gr.values[0];
-    const nd = gr.noDataValue;
+    const mercator = lat => Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360));
+    const north = mercator(gr.north), south = mercator(gr.south);
     for (let y = 0; y < h; y++) {
-      const row = band[y];
+      const mercatorY = north - (y + 0.5) * (north - south) / h;
+      const latitude = (2 * Math.atan(Math.exp(mercatorY)) - Math.PI / 2) * 180 / Math.PI;
+      const sourceY = Math.min(h - 1, Math.max(0, Math.floor((gr.north - latitude) / (gr.north - gr.south) * h)));
       for (let x = 0; x < w; x++) {
-        const v = row[x];
-        const c = (v === nd) ? null : colorRgb(v);
+        const c = colorRgb(gr.values[sourceY * w + x]);
         const i = (y * w + x) * 4;
         if (!c) { img.data[i + 3] = 0; continue; }
         img.data[i] = c[0]; img.data[i + 1] = c[1]; img.data[i + 2] = c[2]; img.data[i + 3] = 255;
@@ -66,6 +68,15 @@ window.tvdiMap = (() => {
     }
     ctx.putImageData(img, 0, 0);
     return cv;
+  }
+
+  function samplePoint(point) {
+    const g = rasterPreview;
+    if (!g) return 'không có dữ liệu';
+    const x = Math.floor((point.lng - g.west) / (g.east - g.west) * g.width);
+    const y = Math.floor((g.north - point.lat) / (g.north - g.south) * g.height);
+    const value = x >= 0 && x < g.width && y >= 0 && y < g.height ? g.values[y * g.width + x] : NaN;
+    return isNoData(value) ? 'không có dữ liệu' : value.toFixed(3) + (g.reduced ? ' (xấp xỉ)' : '');
   }
 
   // ================== Chú giải ==================
@@ -153,10 +164,7 @@ window.tvdiMap = (() => {
               `Pixel hợp lệ: ${s.validPixels}/${s.totalPixels}`;
       if (s.estimated) html += '<br><i>(phường nhỏ hơn 1 pixel: lấy giá trị pixel chứa tâm phường)</i>';
     }
-    if (georaster && typeof geoblaze !== 'undefined') {
-      const v = geoblaze.identify(georaster, [e.latlng.lng, e.latlng.lat]);
-      html += `<br>Điểm vừa bấm: ${v && !isNoData(v[0]) ? v[0].toFixed(3) : 'không có dữ liệu'}`;
-    }
+    if (rasterPreview) html += "<br>Điểm vừa bấm: " + samplePoint(e.latlng);
     popup.setLatLng(e.latlng).setContent(html).openOn(map);
   }
 
@@ -172,6 +180,7 @@ window.tvdiMap = (() => {
     try {
       const [wards, outline] = await Promise.all([fetchJson(WARDS_URL), fetchJson(OUTLINE_URL)]);
       if (map !== thisMap) return;
+      wardFeatures = wards.features || [];
 
       if (!map.getPane('boundaries')) map.createPane('boundaries').style.zIndex = 450;
       const renderer = L.canvas({ pane: 'boundaries' });
@@ -203,7 +212,7 @@ window.tvdiMap = (() => {
       if (!el) throw new Error('Không tìm thấy phần tử bản đồ.');
 
       if (map) { map.remove(); map = null; }
-      layer = null; georaster = null; wardLayer = null; outlineLayer = null;
+      layer = null; rasterPreview = null; wardLayer = null; outlineLayer = null; wardFeatures = [];
       wardStats = new Map(); wardMode = true; rasterVisible = true; filter = null;
 
       map = L.map(el, { maxBounds: MAX_BOUNDS, minZoom: 9 }).fitBounds(HCM);
@@ -212,9 +221,8 @@ window.tvdiMap = (() => {
 
       popup = L.popup();
       map.on('click', e => {
-        if (!georaster || typeof geoblaze === 'undefined') return;
-        const v = geoblaze.identify(georaster, [e.latlng.lng, e.latlng.lat]);
-        const val = v && !isNoData(v[0]) ? v[0].toFixed(3) : 'không có dữ liệu';
+        if (!rasterPreview) return;
+        const val = samplePoint(e.latlng);
         popup.setLatLng(e.latlng).setContent(`TVDI: <b>${val}</b>`).openOn(map);
       });
 
@@ -225,40 +233,52 @@ window.tvdiMap = (() => {
 
     async loadTif(url, opacity = 0.8) {
       if (!map) throw new Error('Bản đồ chưa khởi tạo.');
-      if (typeof parseGeoraster === 'undefined') throw new Error('georaster chưa tải.');
-
-      const res = await fetch(url, { credentials: 'same-origin' });
-      const type = res.headers.get('content-type') || '';
-      if (!res.ok || type.includes('text/html')) {
-        const detail = type.includes('text/plain') ? (await res.text()).slice(0, 200) : '';
-        throw new Error(`Không tải được ảnh (HTTP ${res.status}) từ ${url}. ${detail}`);
-      }
-
-      georaster = await parseGeoraster(await res.arrayBuffer());
+      const targetMap = map;
       if (layer) { map.removeLayer(layer); layer = null; }
-
-      if (georaster.projection === 4326) {
-        const dataUrl = buildCanvas(georaster).toDataURL('image/png');
-        const b = [[georaster.ymin, georaster.xmin], [georaster.ymax, georaster.xmax]];
-        layer = L.imageOverlay(dataUrl, b, { opacity, interactive: false, className: 'tvdi-overlay' });
-      } else {
-        console.warn('[tvdiMap] projection =', georaster.projection, '→ dùng GeoRasterLayer');
-        if (typeof GeoRasterLayer === 'undefined') throw new Error('georaster-layer-for-leaflet chưa tải.');
-        layer = new GeoRasterLayer({
-          georaster, opacity, resolution: 256, resampleMethod: 'nearest',
-          pixelValuesToColorFn: vals => colorHex(vals[0])
-        });
+      rasterPreview = null;
+      const previewUrl = new URL(url, window.location.origin);
+      previewUrl.searchParams.set('preview', 'true');
+      const res = await fetch(previewUrl, { credentials: 'same-origin' });
+      const type = res.headers.get('content-type') || '';
+      if (!res.ok || !type.includes('application/json')) {
+        const detail = type.includes('text/plain') ? (await res.text()).slice(0, 200) : '';
+        throw new Error('Không tải được ảnh TVDI (HTTP ' + res.status + '). ' + detail);
       }
 
+      const preview = await res.json();
+      if (map !== targetMap) return;
+      const bytes = Uint8Array.from(atob(preview.samples), value => value.charCodeAt(0));
+      const view = new DataView(bytes.buffer);
+      preview.values = Float32Array.from({ length: preview.width * preview.height }, (_, index) => view.getFloat32(index * 4, true));
+      rasterPreview = preview;
+      const bounds = [[preview.south, preview.west], [preview.north, preview.east]];
+      layer = L.imageOverlay(buildCanvas(preview).toDataURL('image/png'), bounds,
+        { opacity, interactive: false, className: 'tvdi-overlay' });
       if (rasterVisible) layer.addTo(map);
-      map.fitBounds(layer.getBounds());
+      map.fitBounds(bounds);
     },
 
-    async stats() {
-      if (!georaster || typeof geoblaze === 'undefined') return null;
-      const s = (await geoblaze.stats(georaster))[0];
-      return { mean: s.mean, min: s.min, max: s.max };
+    stats() {
+      if (!rasterPreview) return null;
+      const { mean, min, max } = rasterPreview;
+      return { mean, min, max };
     },
+
+    getWards() { return wardFeatures.map(f => ({ code: f.properties.code, name: f.properties.name })); },
+
+    findWard(query) {
+      if (!map || !wardFeatures.length) throw new Error('Ranh giới phường/xã chưa tải xong.');
+      const q = String(query || '').trim().toLocaleLowerCase('vi');
+      const feature = wardFeatures.find(f => String(f.properties.name).toLocaleLowerCase('vi') === q)
+        || wardFeatures.find(f => String(f.properties.name).toLocaleLowerCase('vi').includes(q));
+      if (!feature) { alert('Không tìm thấy phường/xã phù hợp.'); return; }
+      const bounds = L.geoJSON(feature).getBounds();
+      map.fitBounds(bounds, { maxZoom: 13, padding: [24, 24] });
+      const target = wardLayer?.getLayers().find(l => l.feature.properties.code === feature.properties.code);
+      if (target) target.fire('click', { latlng: bounds.getCenter() });
+    },
+
+    resetView() { if (map) map.fitBounds(HCM); },
 
     setOpacity(o) { if (layer) layer.setOpacity(o); },
 

@@ -36,7 +36,7 @@ public class RandomForestModel : IForecastModel
                 rows.Add(new Row { Lag1 = l1, Lag2 = l2, Lag3 = l3, MonthSin = (float)Math.Sin(ang), MonthCos = (float)Math.Cos(ang), Label = y });
             }
         }
-        if (rows.Count < 100) throw new InvalidOperationException("Không đủ dữ liệu hợp lệ để huấn luyện Random Forest.");
+        if (rows.Count < 100) throw new InvalidDataException("Không đủ dữ liệu hợp lệ để huấn luyện Random Forest.");
 
         var pipe = ml.Transforms.Concatenate("Features", nameof(Row.Lag1), nameof(Row.Lag2), nameof(Row.Lag3), nameof(Row.MonthSin), nameof(Row.MonthCos))
             .Append(ml.Regression.Trainers.FastForest(labelColumnName: nameof(Row.Label), featureColumnName: "Features", numberOfTrees: 100, numberOfLeaves: 20));

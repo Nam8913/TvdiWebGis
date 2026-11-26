@@ -1,14 +1,16 @@
 @page "/admin/upload"
 @attribute [Authorize(Roles = "Admin")]
 @inject RasterFileService Rasters
+@inject IJSRuntime JS
 @using Microsoft.AspNetCore.Authorization
+@using Microsoft.JSInterop
 @using TvdiWebGis.Services
 @rendermode InteractiveServer
 
 <h3>Nạp dữ liệu TVDI (.tif / .tiff)</h3>
 <p>Tên file cần chứa kỳ, ví dụ <code>TVDI_TPHCM_2025_03.tif</code>. Nạp lại cùng kỳ sẽ ghi đè.</p>
 
-<InputFile OnChange="OnFiles" multiple accept=".tif,.tiff" />
+<InputFile OnChange="OnFiles" multiple accept=".tif,.tiff" disabled="@_busy" />
 @if (_busy) { <p>Đang xử lý...</p> }
 <ul>@foreach (var m in _log) { <li>@m</li> }</ul>
 
@@ -18,8 +20,8 @@
     @foreach (var r in _items)
     {
         <tr><td>@r.Period.ToString("MM/yyyy")</td><td>@r.FileName</td><td>@r.Width × @r.Height</td>
-            <td>@r.UploadedAt.ToLocalTime()</td>
-            <td><button class="btn btn-sm btn-danger" @onclick="() => Delete(r.Id)">Xoá</button></td></tr>
+            <td>@r.UploadedAt.ToLocalTime().ToString("dd/MM/yyyy HH:mm")</td>
+            <td><button class="btn btn-sm btn-danger" disabled="@_busy" @onclick="() => ConfirmDelete(r)">Xoá</button></td></tr>
     }
     </tbody>
 </table>
@@ -28,22 +30,65 @@
     List<Data.Entities.RasterFile> _items = [];
     List<string> _log = [];
     bool _busy;
+    async Task ConfirmDelete(Data.Entities.RasterFile row)
+    {
+        if (!await JS.InvokeAsync<bool>("confirm", $"Xóa ảnh {row.Period:MM/yyyy} ({row.FileName}) khỏi chuỗi dữ liệu?")) return;
+        await Delete(row.Id, row.FileName);
+    }
 
     protected override async Task OnInitializedAsync() => _items = await Rasters.ListAsync();
 
     async Task OnFiles(InputFileChangeEventArgs e)
     {
-        _busy = true; _log.Clear();
-        foreach (var f in e.GetMultipleFiles(50))
+        if (_busy) return;
+        _log.Clear();
+
+        const int maxFiles = 10;
+        if (e.FileCount > maxFiles)
         {
-            using var ms = new MemoryStream();
-            await f.OpenReadStream(300_000_000).CopyToAsync(ms);
-            var (_, msg) = await Rasters.AddAsync(f.Name, ms.ToArray());
-            _log.Add(msg);
+            _log.Add("Mỗi lượt chỉ được chọn tối đa 10 tệp.");
+            return;
         }
-        _items = await Rasters.ListAsync();
-        _busy = false;
+
+        var files = e.GetMultipleFiles(maxFiles);
+        if (files.Any(f => f.Size <= 0 || f.Size > RasterFileService.MaxUploadBytes) ||
+            files.Sum(f => f.Size) > 100L * 1024 * 1024)
+        {
+            _log.Add("Mỗi tệp tối đa 50 MiB và mỗi lượt tối đa 100 MiB.");
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            foreach (var file in files)
+            {
+                try
+                {
+                    await using var stream = file.OpenReadStream(RasterFileService.MaxUploadBytes);
+                    var data = new byte[(int)file.Size];
+                    await stream.ReadExactlyAsync(data);
+                    var (ok, message) = await Rasters.AddAsync(file.Name, data);
+                    _log.Add($"[{DateTime.Now:dd/MM/yyyy HH:mm}] {(ok ? "THÀNH CÔNG" : "THẤT BẠI")} · {message}");
+                }
+                catch (IOException)
+                {
+                    _log.Add($"[{DateTime.Now:dd/MM/yyyy HH:mm}] THẤT BẠI · {file.Name}: Không đọc được tệp đã chọn.");
+                }
+            }
+
+            _items = await Rasters.ListAsync();
+        }
+        finally
+        {
+            _busy = false;
+        }
     }
 
-    async Task Delete(Guid id) { await Rasters.DeleteAsync(id); _items = await Rasters.ListAsync(); }
+    async Task Delete(Guid id, string name)
+    {
+        _busy = true;
+        try { await Rasters.DeleteAsync(id); _log.Add($"[{DateTime.Now:dd/MM/yyyy HH:mm}] ĐÃ XÓA · {name}"); _items = await Rasters.ListAsync(); }
+        finally { _busy = false; }
+    }
 }

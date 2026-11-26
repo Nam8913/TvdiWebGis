@@ -1,0 +1,307 @@
+@page "/analysis"
+@attribute [Authorize]
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+@implements IDisposable
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.JSInterop
+@using System.Globalization
+@using TvdiWebGis.Data.Entities
+@using TvdiWebGis.Services
+@inject TvdiAnalysisService AnalysisService
+@inject RasterFileService Rasters
+@inject TvdiWebGis.Services.WardZonalService WardService
+@inject IJSRuntime JS
+@inject ILogger<Analysis> Logger
+
+<PageTitle>Phân tích TVDI</PageTitle>
+
+<header class="analysis-intro">
+    <h1>Phân tích TVDI</h1>
+    <p>So sánh ảnh quan sát theo phường/xã và kiểm định dự báo bằng ảnh thực tế.</p>
+</header>
+
+@if (_observed.Count == 0)
+{
+    <p class="alert alert-info">Cần nạp ảnh TVDI để bắt đầu phân tích.</p>
+}
+else
+{
+    <section class="analysis-card" aria-labelledby="comparison-heading">
+        <h2 id="comparison-heading">Biến động giữa hai tháng</h2>
+        <div class="analysis-controls">
+            <label>Tháng trước
+                <select class="form-select" @bind="_before" disabled="@_busy">
+                    @foreach (var raster in _observed)
+                    {
+                        <option value="@raster.Id">@raster.Period.ToString("MM/yyyy")</option>
+                    }
+                </select>
+            </label>
+            <label>Tháng sau
+                <select class="form-select" @bind="_after" disabled="@_busy">
+                    @foreach (var raster in _observed)
+                    {
+                        <option value="@raster.Id">@raster.Period.ToString("MM/yyyy")</option>
+                    }
+                </select>
+            </label>
+            <button class="btn btn-primary" @onclick="Compare" disabled="@(_busy || _observed.Count < 2)">So sánh</button>
+            @if (_changes is not null)
+            {
+                <button class="btn btn-outline-primary" @onclick="Export" disabled="@_busy">Tải CSV</button>
+            }
+        </div>
+
+        <p class="analysis-muted">Chênh lệch = TVDI tháng sau − tháng trước, tính trên cùng nhóm pixel có dữ liệu ở cả hai tháng.</p>
+        <div @ref="_map" class="analysis-map" hidden="@(_changes is null)" aria-label="Bản đồ biến động TVDI theo phường xã"></div>
+
+        @if (_changes is not null)
+        {
+            <div class="analysis-legend"><span>Giảm</span><span class="analysis-ramp"></span><span>Tăng</span><span>• Xám: thiếu dữ liệu</span></div>
+            <p class="analysis-muted">@_comparisonPeriod · @_changes.Count(r => r.Delta.HasValue)/@_changes.Count phường/xã có thể so sánh.</p>
+            <div class="table-responsive analysis-table">
+                <table class="table table-sm align-middle">
+                    <thead><tr><th>Phường/xã</th><th>Trước</th><th>Sau</th><th>Chênh lệch</th><th>Pixel chung</th></tr></thead>
+                    <tbody>
+                    @foreach (var row in _changes)
+                    {
+                        <tr>
+                            <td>@row.Name @(row.Estimated ? "(ước tính)" : "")</td><td>@Format(row.Before)</td><td>@Format(row.After)</td>
+                            <td>@Format(row.Delta, "+0.000;-0.000;0.000")</td><td>@row.Pixels</td>
+                        </tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
+        }
+    </section>
+
+    <section class="analysis-card" aria-labelledby="trend-heading">
+        <h2 id="trend-heading">Xu hướng TVDI theo phường/xã</h2>
+        <div class="analysis-controls">
+            <label>Phường/xã
+                <select class="form-select" @bind="_trendCode" disabled="@_busy">
+                    @foreach (var ward in _wards) { <option value="@ward.Code">@ward.Name</option> }
+                </select>
+            </label>
+            <button class="btn btn-primary" @onclick="LoadTrend" disabled="@(_busy || string.IsNullOrEmpty(_trendCode))">Xem xu hướng</button>
+            @if (_trend.Count > 0) { <button class="btn btn-outline-primary" @onclick="ExportTrend">Tải CSV xu hướng</button> }
+        </div>
+        <p class="analysis-muted">Mỗi điểm là TVDI trung bình của các pixel hợp lệ trong ranh giới phường/xã ở tháng đó. Di chuột lên điểm để xem số liệu.</p>
+        @if (_trend.Count > 0) { <canvas @ref="_trendCanvas" class="trend-chart" aria-label="Biểu đồ xu hướng TVDI theo tháng"></canvas> }
+    </section>
+
+    <section class="analysis-card" aria-labelledby="validation-heading">
+        <h2 id="validation-heading">Kiểm định dự báo</h2>
+        <div class="analysis-controls">
+            <label>Tháng có ảnh thực tế
+                <select class="form-select" @bind="_target" disabled="@_busy">
+                    @foreach (var raster in _observed)
+                    {
+                        <option value="@raster.Id">@raster.Period.ToString("MM/yyyy")</option>
+                    }
+                </select>
+            </label>
+            <label>Hạn dự báo
+                <select class="form-select" @bind="_horizon" disabled="@_busy">
+                    @for (int step = 1; step <= ForecastService.Horizon; step++)
+                    {
+                        <option value="@step">@step tháng</option>
+                    }
+                </select>
+            </label>
+            <button class="btn btn-primary" @onclick="Validate" disabled="@(_busy || _observed.Count < 4)">Chạy kiểm định</button>
+        </div>
+        <p class="analysis-muted">Mô hình chỉ học từ các tháng trước mốc kiểm định. MAE và RMSE thấp hơn nghĩa là sai số nhỏ hơn trên nhóm pixel chung.</p>
+        @if (_observed.Count < 4)
+        {
+            <p>Cần ít nhất bốn tháng quan sát để kiểm định hồi quy tuyến tính.</p>
+        }
+        @if (_validation is { } validation)
+        {
+            <p>Dùng dữ liệu đến @validation.Origin.ToString("MM/yyyy"), đối chiếu ảnh @validation.Target.ToString("MM/yyyy").</p>
+            @if (!validation.Metrics.Any(m => m.Pixels > 0))
+            {
+                <p class="alert alert-warning">Không có pixel chung hợp lệ để tính sai số.</p>
+            }
+            @if (validation.Metrics.Count < 3)
+            {
+                <p>Random Forest cần ít nhất 12 tháng huấn luyện và đủ mẫu pixel hợp lệ.</p>
+            }
+            <div class="table-responsive">
+                <button class="btn btn-outline-primary btn-sm mb-2" @onclick="ExportValidation">Tải CSV kiểm định</button>
+                <table class="table table-sm">
+                    <thead><tr><th>Mô hình</th><th>Pixel kiểm định</th><th>MAE</th><th>RMSE</th></tr></thead>
+                    <tbody>
+                    @foreach (var metric in validation.Metrics)
+                    {
+                        <tr><td>@metric.Model</td><td>@metric.Pixels</td><td>@Format(metric.Mae)</td><td>@Format(metric.Rmse)</td></tr>
+                    }
+                    </tbody>
+                </table>
+            </div>
+        }
+        <div hidden="@(_validation is null || !_validation.Metrics.Any(m => m.Pixels > 0))">
+            @if (_validation is { } scores && scores.Metrics.Any(m => m.Pixels > 0))
+            {
+                <label class="analysis-controls">Mô hình trên bản đồ sai số
+                    <select class="form-select w-auto" @bind="_selectedMetric" @bind:after="UpdateErrorMap">
+                        @for (int i = 0; i < scores.Metrics.Count; i++)
+                        {
+                            <option value="@i">@scores.Metrics[i].Model</option>
+                        }
+                    </select>
+                </label>
+                <p class="analysis-muted">Sai số có dấu = dự báo − quan sát. Xanh: dự báo thấp hơn. Cam: dự báo cao hơn.</p>
+            }
+            <div @ref="_errorCanvas" class="analysis-map" aria-label="Bản đồ sai số dự báo theo phường xã"></div>
+        </div>
+    </section>
+
+    <AuthorizeView Roles="Admin">
+        <Authorized>
+            <section class="analysis-card" aria-labelledby="quality-heading">
+                <h2 id="quality-heading">Chất lượng chuỗi ảnh</h2>
+                <p class="analysis-muted">Tháng thiếu: @(_missing.Count == 0 ? "Không có trong khoảng đã nạp." : string.Join(", ", _missing))</p>
+                <button class="btn btn-outline-primary" @onclick="Inspect" disabled="@_busy">Kiểm tra ảnh đã nạp</button>
+                @if (_quality is not null)
+                {
+                    <button class="btn btn-outline-primary btn-sm mt-2" @onclick="ExportQuality">Tải CSV chất lượng ảnh</button>
+                    <div class="table-responsive analysis-table mt-3">
+                        <table class="table table-sm">
+                            <thead><tr><th>Tháng</th><th>Tệp</th><th>Pixel hợp lệ</th><th>Kết quả</th></tr></thead>
+                            <tbody>
+                            @foreach (var row in _quality)
+                            {
+                                <tr><td>@row.Period.ToString("MM/yyyy")</td><td>@row.FileName</td><td>@Format(row.Coverage, "P1")</td><td>@(row.Issue ?? "Hợp lệ")</td></tr>
+                            }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </section>
+        </Authorized>
+    </AuthorizeView>
+}
+
+<div aria-live="polite" class="analysis-status">
+    @if (_busy) { <p role="status" class="alert alert-info">Đang xử lý dữ liệu TVDI…</p> }
+    @if (_error is not null) { <p role="alert" class="alert alert-warning">@_error</p> }
+</div>
+
+@code {
+    private readonly CancellationTokenSource _lifetime = new();
+    private List<RasterFile> _observed = [];
+    private readonly List<string> _missing = [];
+    private IReadOnlyList<WardChange>? _changes;
+    private IReadOnlyList<RasterQualityRow>? _quality;
+    private ValidationResult? _validation;
+    private Guid _before, _after, _target;
+    private int _horizon = 1;
+    private string _comparisonPeriod = "";
+    private string? _error;
+    private bool _busy, _drawMap;
+    private ElementReference _map, _errorCanvas;
+    private int _selectedMetric;
+    private bool _drawErrorMap;
+    private IReadOnlyList<TvdiWebGis.Services.WardInfo> _wards = [];
+    private IReadOnlyList<TvdiWebGis.Services.WardTrendPoint> _trend = [];
+    private string _trendCode = "";
+    private ElementReference _trendCanvas;
+    private bool _drawTrend;
+
+    private void UpdateErrorMap() => _drawErrorMap = true;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _observed = await Rasters.ListAsync();
+        if (_observed.Count == 0) return;
+        _wards = WardService.Wards;
+        if (_wards.Count > 0) _trendCode = _wards[0].Code;
+        _before = _observed[Math.Max(0, _observed.Count - 2)].Id;
+        _after = _target = _observed[^1].Id;
+        var periods = _observed.Select(x => x.Period).ToHashSet();
+        for (var month = _observed[0].Period; month < _observed[^1].Period; month = month.AddMonths(1))
+            if (!periods.Contains(month)) _missing.Add(month.ToString("MM/yyyy"));
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!_drawMap && !_drawErrorMap && !_drawTrend) return;
+        var drawChange = _drawMap;
+        var drawTrend = _drawTrend;
+        _drawMap = _drawErrorMap = _drawTrend = false;
+        try
+        {
+            if (drawTrend)
+                await JS.InvokeVoidAsync("tvdiAnalysis.drawTrend", _trendCanvas, _trend.Select(p => new { period = p.Period.ToString("MM/yyyy"), mean = p.Mean, pixels = p.Pixels, estimated = p.Estimated }), _wards.FirstOrDefault(w => w.Code == _trendCode)?.Name ?? "");
+            else if (drawChange)
+                await JS.InvokeVoidAsync("tvdiAnalysis.drawChange", _map, _changes, false);
+            else if (_validation is { } validation)
+                await JS.InvokeVoidAsync("tvdiAnalysis.drawChange", _errorCanvas, validation.Metrics[_selectedMetric].WardErrors, true);
+        }
+        catch (JSDisconnectedException) { }
+        catch (JSException ex)
+        {
+            Logger.LogWarning(ex, "Could not draw TVDI ward change map.");
+            _error = "Không tải được bản đồ. Bạn vẫn có thể xem các bảng kết quả.";
+            StateHasChanged();
+        }
+    }
+
+    private Task Compare() => Run(async token =>
+    {
+        _changes = null;
+        var before = _observed.Single(r => r.Id == _before);
+        var after = _observed.Single(r => r.Id == _after);
+        if (after.Period <= before.Period)
+            throw new InvalidDataException("Chọn tháng sau lớn hơn tháng trước.");
+        var result = await AnalysisService.CompareAsync(before.Id, after.Id, token);
+        _changes = result.OrderByDescending(r => Math.Abs(r.Delta ?? 0))
+            .ThenByDescending(r => r.Delta.HasValue).ThenBy(r => r.Name).ToList();
+        _comparisonPeriod = $"{before.Period:MM/yyyy} → {after.Period:MM/yyyy}";
+        _drawMap = true;
+    });
+
+    private Task Validate() => Run(async token =>
+    {
+        _validation = null;
+        _validation = await AnalysisService.ValidateAsync(_observed.Single(r => r.Id == _target).Period, _horizon, token);
+        _selectedMetric = 0;
+        _drawErrorMap = _validation.Metrics.Any(m => m.Pixels > 0);
+    });
+
+    private Task Inspect() => Run(async token => _quality = await AnalysisService.InspectAsync(token));
+
+    private Task LoadTrend() => Run(async token => { _trend = await AnalysisService.TrendAsync(_trendCode, token); _drawTrend = true; });
+    private Task ExportTrend() => Run(token => JS.InvokeVoidAsync("tvdiAnalysis.downloadTrend", token, _trend.Select(p => new { period = p.Period.ToString("MM/yyyy"), mean = p.Mean, pixels = p.Pixels, estimated = p.Estimated }), _wards.FirstOrDefault(w => w.Code == _trendCode)?.Name ?? "").AsTask());
+    private Task ExportValidation() => _validation is null ? Task.CompletedTask : Run(token => JS.InvokeVoidAsync("tvdiAnalysis.downloadValidation", token, new { target = _validation.Target.ToString("MM/yyyy"), origin = _validation.Origin.ToString("MM/yyyy"), metrics = _validation.Metrics.Select(m => new { model = m.Model, pixels = m.Pixels, mae = m.Mae, rmse = m.Rmse, wardErrors = m.WardErrors }) }).AsTask());
+    private Task ExportQuality() => _quality is null ? Task.CompletedTask : Run(token => JS.InvokeVoidAsync("tvdiAnalysis.downloadQuality", token, _quality.Select(q => new { period = q.Period.ToString("MM/yyyy"), fileName = q.FileName, coverage = q.Coverage, issue = q.Issue })).AsTask());
+
+    private Task Export() => Run(token => JS.InvokeVoidAsync("tvdiAnalysis.downloadCsv", token, _changes, _comparisonPeriod).AsTask());
+
+    private async Task Run(Func<CancellationToken, Task> action)
+    {
+        if (_busy) return;
+        _busy = true;
+        _error = null;
+        try { await action(_lifetime.Token); }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested) { }
+        catch (InvalidDataException ex) { _error = ex.Message; }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "TVDI analysis failed.");
+            _error = "Không thể hoàn thành phân tích. Vui lòng thử lại.";
+        }
+        finally { _busy = false; }
+    }
+
+    private static string Format(double? value, string format = "0.000") =>
+        value?.ToString(format, CultureInfo.InvariantCulture) ?? "—";
+
+    public void Dispose()
+    {
+        _lifetime.Cancel();
+        _lifetime.Dispose();
+    }
+}
