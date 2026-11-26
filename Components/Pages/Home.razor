@@ -65,6 +65,14 @@
 </div>
 
 <div class="filter-panel">
+    <label>Tìm phường/xã
+        <input list="ward-options" @bind="_wardSearch" @bind:event="oninput" placeholder="Nhập tên phường/xã" />
+        <datalist id="ward-options">
+            @foreach (var ward in _wards) { <option value="@ward.Name"></option> }
+        </datalist>
+    </label>
+    <button class="btn btn-sm btn-outline-primary" @onclick="FindWard" disabled="@string.IsNullOrWhiteSpace(_wardSearch)">Định vị</button>
+    <button class="btn btn-sm btn-outline-secondary" @onclick="ResetMap">Toàn TP.HCM</button>
     <label><input type="checkbox" @bind="_wardMode" @bind:after="OnWardMode" /> Hiện giá trị theo phường/xã</label>
     <label><input type="checkbox" @bind="_showRaster" @bind:after="OnShowRaster" /> Hiện ảnh raster</label>
 
@@ -88,7 +96,7 @@
         <input type="number" step="0.01" min="0" max="1" @bind="_val2" style="width:80px" />
     }
     <button class="btn btn-sm btn-primary" @onclick="ApplyFilter" disabled="@(!_wardMode)">Lọc</button>
-    <button class="btn btn-sm btn-outline-secondary" @onclick="ClearFilter" disabled="@(!_filterOn)">Bỏ lọc</button>
+    <button class="btn btn-sm btn-outline-secondary" @onclick="ClearFilter">Bỏ lọc</button>
 
     @if (_summary is not null)
     {
@@ -165,6 +173,8 @@
 
     // Phường/xã + bộ lọc
     bool _wardMode = true, _showRaster = true, _filterOn;
+    string _wardSearch = "";
+    List<Services.WardInfo> _wards = [];
     string _op = "gte";
     double _val = 0.6, _val2 = 0.8;
     WardSummary? _summary;
@@ -191,6 +201,7 @@
         {
             Console.WriteLine(">>> Home: gọi tvdiMap.init");
             await JS.InvokeVoidAsync("tvdiMap.init", "map");
+            _wards = await JS.InvokeAsync<List<Services.WardInfo>>("tvdiMap.getWards");
             await Reload();
         }
         catch (Exception ex)
@@ -269,11 +280,24 @@
     {
         _filterOn = false;
         _matches = null;
-        await JS.InvokeVoidAsync("tvdiMap.clearFilter");
+        try
+        {
+            await JS.InvokeVoidAsync("tvdiMap.clearFilter");
+        }
+        catch (JSException ex)
+        {
+            _error = "Không thể cập nhật lớp bản đồ: " + ex.Message;
+        }
+        finally
+        {
+            StateHasChanged();
+        }
     }
 
     async Task OnWardMode() => await JS.InvokeVoidAsync("tvdiMap.setWardMode", _wardMode);
     async Task OnShowRaster() => await JS.InvokeVoidAsync("tvdiMap.setRasterVisible", _showRaster);
+    async Task FindWard() => await JS.InvokeVoidAsync("tvdiMap.findWard", _wardSearch);
+    async Task ResetMap() => await JS.InvokeVoidAsync("tvdiMap.resetView");
 
     async Task OnOpacity(ChangeEventArgs e)
     {

@@ -12,16 +12,30 @@ public class GeoTiffService
 
     public BandData Read(byte[] data)
     {
+        if (data.Length < 8 ||
+            !((data[0] == 0x49 && data[1] == 0x49 && data[2] is 42 or 43 && data[3] == 0) ||
+              (data[0] == 0x4d && data[1] == 0x4d && data[2] == 0 && data[3] is 42 or 43)))
+            throw new InvalidDataException("Tệp không có chữ ký TIFF hợp lệ.");
+
         var vsi = $"/vsimem/{Guid.NewGuid():N}.tif";
         Gdal.FileFromMemBuffer(vsi, data);
         try
         {
             using var ds = Gdal.Open(vsi, Access.GA_ReadOnly);
+            if (ds is null || ds.RasterCount < 1)
+                throw new InvalidDataException("Không đọc được băng ảnh.");
+            using var driver = ds.GetDriver();
+            if (driver.ShortName != "GTiff")
+                throw new InvalidDataException("Chỉ hỗ trợ định dạng GeoTIFF.");
+
             int w = ds.RasterXSize, h = ds.RasterYSize;
+            if (w <= 0 || h <= 0 || (long)w * h > 16_000_000)
+                throw new InvalidDataException("Ảnh vượt giới hạn 16 triệu pixel.");
             var gt = new double[6]; ds.GetGeoTransform(gt);
             using var band = ds.GetRasterBand(1);
             var px = new float[w * h];
-            band.ReadRaster(0, 0, w, h, px, w, h, 0, 0);
+            if (band.ReadRaster(0, 0, w, h, px, w, h, 0, 0) != CPLErr.CE_None)
+                throw new InvalidDataException("Không đọc được dữ liệu pixel.");
 
             band.GetNoDataValue(out double nd, out int hasNd);
             for (int i = 0; i < px.Length; i++)

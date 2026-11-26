@@ -97,4 +97,26 @@ h1:focus {
   padding: 0 3px; font-size: 11px; font-weight: 600; color: #111;
 }
 .ward-label::before { display: none; }
-.hide-ward-labels .ward-label { display: none; }   /* ẩn nhãn khi zoom xa */
+.hide-ward-labels .ward-label { display: none; }   /* ẩn nhãn khi zoom xa */.analysis-intro { margin: 1rem 0 1.5rem; }
+.analysis-card { background: #fff; border: 1px solid #dce5ec; border-radius: .8rem; padding: clamp(.9rem, 3vw, 1.4rem); margin: 0 0 1rem; }
+.analysis-card h2 { font-size: 1.25rem; margin-bottom: .9rem; }
+.analysis-controls { display: flex; flex-wrap: wrap; align-items: end; gap: .65rem; margin-bottom: .8rem; }
+.analysis-controls label { font-weight: 600; }
+.analysis-controls select { font-weight: 400; }
+.analysis-muted { color: #485965; }
+.analysis-map { height: clamp(19rem, 48vh, 34rem); border-radius: .5rem; }
+.analysis-map[hidden] { display: none; }
+.analysis-legend { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; margin: .75rem 0; }
+.analysis-ramp { width: 7rem; height: .65rem; border-radius: 1rem; background: linear-gradient(90deg,#2166ad,#eee9dd,#cd4a18); }
+.analysis-table { max-height: 23rem; overflow: auto; }
+.analysis-table thead { position: sticky; top: 0; background: #fff; z-index: 1; }
+.analysis-status { position: fixed; z-index: 1001; bottom: .6rem; right: .7rem; max-width: min(28rem, 95vw); }
+.trend-chart { display: block; width: 100%; height: 280px; border: 1px solid #e0e7ee; border-radius: .5rem; background: #fff; }
+@media (max-width: 640px) {
+  #map { height: 68vh; min-height: 360px; }
+  .filter-panel { align-items: stretch; }
+  .filter-panel > label { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
+  .filter-panel input[list] { max-width: 58vw; }
+  .tvdi-legend { min-width: 135px; padding: 6px 8px; font-size: 11px; }
+  .analysis-map { height: 58vh; min-height: 18rem; }
+}

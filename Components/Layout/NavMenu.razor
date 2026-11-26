@@ -55,6 +55,11 @@
             </NotAuthorized>
         </AuthorizeView>
         <div class="nav-item"><NavLink class="nav-link" href="" Match="NavLinkMatch.All">Bản đồ TVDI</NavLink></div>
+        <AuthorizeView>
+            <Authorized>
+                <div class="nav-item"><NavLink class="nav-link" href="analysis">Phân tích TVDI</NavLink></div>
+            </Authorized>
+        </AuthorizeView>
         <AuthorizeView Roles="Admin">
             <div class="nav-item"><NavLink class="nav-link" href="admin/upload">Nạp dữ liệu</NavLink></div>
             <div class="nav-item"><NavLink class="nav-link" href="admin/models">Mô hình</NavLink></div>
